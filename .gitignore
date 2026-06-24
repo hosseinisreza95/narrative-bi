@@ -1,0 +1,13 @@
+# Python environment
+venv/
+__pycache__/
+
+# Database files
+*.sqlite
+*.sqlite3
+
+# ChromaDB Vector storage folders (UUIDs)
+[0-9a-f]*-*-*-*-*
+
+# Security
+.env
