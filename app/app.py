@@ -1,76 +1,96 @@
 import streamlit as st
+import plotly.express as px
+import pandas as pd
 import os
-from dotenv import load_dotenv
-from vanna.openai import OpenAI_Chat
-from vanna.chromadb import ChromaDB_VectorStore
 
-# Load environment variables from the .env file
-load_dotenv()
-
-# Read the API key from the environment
-MY_OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-
-# A safety check to warn the user if they forgot to set the API key
-if not MY_OPENAI_KEY:
-    st.error("🚨 API Key is missing! Please create a .env file and add your OPENAI_API_KEY.")
-    st.stop()
-
-# 1. Combine Vanna with OpenAI and ChromaDB for vector storage (memory)
-class MyVanna(ChromaDB_VectorStore, OpenAI_Chat):
-    def __init__(self, config=None):
-        ChromaDB_VectorStore.__init__(self, config=config)
-        OpenAI_Chat.__init__(self, config=config)
-
-# 2. Connect to the OpenAI model (passing the API key directly to the config)
-vn = MyVanna(config={
-    'api_key': MY_OPENAI_KEY, 
-    'model': 'gpt-4o-mini'
-})
-
-# 3. Connect to the SQLite database
-vn.connect_to_sqlite('sales_data.sqlite')
-
-# 4. Initial training for the agent (providing the schema/DDL)
-vn.train(ddl="""
-CREATE TABLE daily_sales (
-    date TEXT,
-    region TEXT,
-    sales_amount INTEGER,
-    marketing_spend INTEGER
+# Import our custom modules
+from vector_store import setup_vector_db, get_relevant_schema
+from core_pipeline import (
+    get_sql_query, 
+    execute_query_safely, 
+    calculate_statistics, 
+    generate_plotly_code,
+    generate_narrative_report
 )
-""")
 
-# 5. Build the UI with Streamlit
-st.title("📊 Narrative BI Smart Agent (Powered by OpenAI)")
-st.write("Ask your question about the sales data:")
+# Configuration
+DB_PATH = 'sales_data.sqlite'
 
-# Update the example to match the simple test data
-user_question = st.text_input("Example: What is the total sales amount for the North region?")
+# Initialize Vector DB (Runs once and caches)
+@st.cache_resource
+def init_system():
+    return setup_vector_db(DB_PATH)
 
-if user_question:
-    with st.spinner("Analyzing and finding the root cause with OpenAI..."):
-        # Generate the SQL query based on the user question
-        sql = vn.generate_sql(question=user_question)
+st.set_page_config(page_title="Narrative BI Engine", page_icon="📊", layout="wide")
+st.title("📊 Narrative BI Engine")
+st.markdown("Ask business questions and get data-driven insights instantly.")
+
+# System Setup
+collection = init_system()
+
+user_question = st.text_input("Ask your business question:", placeholder="e.g., What is the total sales amount in the North region?")
+
+if st.button("Analyze") and user_question:
+    with st.spinner("Analyzing data..."):
         
-        # Check if the LLM actually generated a SQL query (prevent execution errors)
-        if "SELECT" in sql.upper() or "WITH" in sql.upper():
-            # Execute SQL, generate Plotly code, get figure, and generate summary
-            df = vn.run_sql(sql=sql)
-            code = vn.generate_plotly_code(question=user_question, sql=sql, df=df)
-            fig = vn.get_plotly_figure(plotly_code=code, df=df)
-            summary = vn.generate_summary(question=user_question, df=df)
-
-            # Display the results
-            st.subheader("📝 Narrative & Analysis:")
-            st.write(summary)
-            
-            st.subheader("📈 Analytical Chart:")
-            st.plotly_chart(fig)
-            
-            with st.expander("View SQL Query and Raw Data"):
-                st.code(sql, language='sql')
-                st.dataframe(df)
+        # 1. Retrieve Schema
+        schema = get_relevant_schema(collection, user_question)
+        
+        # 2. LLM Call 1: Get SQL
+        sql_query = get_sql_query(user_question, schema)
+        
+        # 3. Python Deterministic Execution
+        df, error = execute_query_safely(DB_PATH, sql_query)
+        
+        if error:
+            st.error(f"Database execution error: {error}")
+            st.code(sql_query, language="sql")
+        elif df is None or df.empty:
+            st.warning("Query executed successfully, but no data was found.")
+            st.code(sql_query, language="sql")
         else:
-            # If the output is not SQL (e.g., LLM asks for clarification), handle it gracefully
-            st.warning("The AI could not generate a valid database query for this question.")
-            st.info(f"Raw model response: {sql}")
+            # 4. Calculate Stats & LLM Calls for Chart and Narrative
+            stats = calculate_statistics(df)
+            
+            # The Vanna Way: Ask LLM to write Plotly code
+            plotly_code = generate_plotly_code(user_question, df)
+            
+            # Get Narrative
+            narrative = generate_narrative_report(user_question, df, stats)
+            
+            # --- Display Results ---
+            st.subheader("📝 Executive Summary")
+            st.info(narrative)
+            
+            # Safely execute the LLM-generated Python code
+            st.subheader("📈 Data Visualization")
+            if len(df.columns) >= 2:
+                # Create a local environment for the exec() function to run safely
+                local_vars = {'df': df, 'px': px, 'pd': pd}
+                try:
+                    # Run the code generated by LLM
+                    exec(plotly_code, globals(), local_vars)
+                    
+                    # Extract the 'fig' variable created by the LLM code
+                    fig = local_vars.get('fig')
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.warning("The AI generated code, but failed to create a 'fig' object.")
+                except Exception as e:
+                    st.error(f"Failed to render chart. Code execution error: {e}")
+                    with st.expander("View generated code"):
+                        st.code(plotly_code, language="python")
+            else:
+                st.write("Not enough data columns to generate a meaningful chart.")
+            
+            # Debugging / Under the hood
+            with st.expander("🔍 Under the Hood (Raw Data & Queries)"):
+                st.write("**Generated SQL Query:**")
+                st.code(sql_query, language="sql")
+                
+                st.write("**Generated Plotly Code:**")
+                st.code(plotly_code, language="python")
+                
+                st.write("**Extracted DataFrame:**")
+                st.dataframe(df)

@@ -1,21 +1,25 @@
 import sqlite3
-import pandas as pd
 import random
-from datetime import datetime, timedelta
 
-# ساخت اتصال به دیتابیس محلی
 conn = sqlite3.connect('sales_data.sqlite')
+cursor = conn.cursor()
 
-# تولید دیتای تستی
-dates = [datetime.today() - timedelta(days=x) for x in range(30)]
-data = {
-    'date': [d.strftime('%Y-%m-%d') for d in dates],
-    'region': [random.choice(['North', 'South', 'East', 'West']) for _ in range(30)],
-    'sales_amount': [random.randint(1000, 5000) for _ in range(30)],
-    'marketing_spend': [random.randint(200, 1000) for _ in range(30)]
-}
+# Create table
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS daily_sales (
+    date TEXT,
+    region TEXT,
+    sales_amount INTEGER,
+    marketing_spend INTEGER
+)
+''')
 
-df = pd.DataFrame(data)
-df.to_sql('daily_sales', conn, if_exists='replace', index=False)
-print("دیتابیس تستی با موفقیت ساخته شد!")
+# Insert sample data
+regions = ['North', 'South', 'East', 'West']
+for i in range(1, 31):
+    for region in regions:
+        cursor.execute(f"INSERT INTO daily_sales VALUES ('2023-10-{i:02d}', '{region}', {random.randint(1000, 5000)}, {random.randint(100, 1000)})")
+
+conn.commit()
 conn.close()
+print("Database 'sales_data.sqlite' created successfully!")
